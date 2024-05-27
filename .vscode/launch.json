@@ -5,18 +5,22 @@
     "version": "0.2.0",
     "configurations": [
         {
-            "name": "app.e0016372.py",
+            "name": "cxmt/eval.py",
             "type": "debugpy",
             "request": "launch",
-            "program": "${workspaceFolder}/tests/app.e0016372.py",
+            "program": "${workspaceFolder}/scripts/cxmt/eval.py",
             "console": "integratedTerminal",
+            "justMyCode": false,
             "env": {
                 "CUDA_VISIBLE_DEVICES": "7"
             },
             "args": [
-                "--model_path", "/home/app.e0016372/models/Meta-Llama-3-8B-Instruct",
-                "--task", "mmlu",
-                "--template", "llama3"
+                "--model_path",
+                "/home/app.e0016372/models/Meta-Llama-3-8B",
+                "--data_dir",
+                "/home/app.e0016372/data/temp",
+                "--template",
+                "llama3"
             ]
         }
     ]

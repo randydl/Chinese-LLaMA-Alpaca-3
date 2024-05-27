@@ -1,7 +1,6 @@
 import os
 import fire
 import torch
-import argparse
 import numpy as np
 import pandas as pd
 from pathlib import Path
@@ -9,75 +8,76 @@ from tqdm.auto import tqdm
 from transformers import AutoTokenizer, AutoModelForCausalLM
 
 
-def format_example(df, idx, include_answer=True):
-    df_row = df.loc[idx, 'Question':'Answer']
-    prompt = df_row['Question']
-    for choice in df_row.index[1:-1]:
-        prompt += f'\n{choice}. {df_row[choice]}'
+def format_example(row, choices, include_answer=True):
+    prompt = row['Question']
+    for choice in choices:
+        prompt += f'\n{choice}. {row[choice]}'
     prompt += '\n答案：'
     if include_answer:
-        prompt += f'{df_row["Answer"]}\n\n'
+        prompt += f'{row["Answer"]}\n\n'
     return prompt
 
 
-def gen_prompt(df, fewshot):
-    prompt = '以下是关于半导体集成电路考试的单项选择题，请选出其中的正确答案。\n\n'
-    for idx in df[:fewshot].index:
-        prompt += format_example(df, idx)
-    return prompt
+def gen_fewshot_prompt(df, n_shot):
+    fewshot_examples = df.head(n_shot)
+    choices = [col for col in df.columns if col not in ['Question', 'Answer']]
+    prompt = '以下是中国关于半导体集成电路考试的单项选择题，请选出其中的正确答案。\n\n'
+    for _, row in fewshot_examples.iterrows():
+        prompt += format_example(row, choices)
+    return prompt, choices
 
 
 @torch.no_grad()
-def model_eval(model, tokenizer, df, fewshot):
-    score = []
-    result = df[fewshot:].copy(deep=True)
+def evaluate_model(model, tokenizer, df, n_shot):
+    accuracy_list = []
+    results = []
 
-    for idx in tqdm(result.index, leave=False):
-        prompt = gen_prompt(df, fewshot)
-        prompt += format_example(df, idx, False)
+    prompt_prefix, choices = gen_fewshot_prompt(df, n_shot)
+    test_examples = df.iloc[n_shot:]
 
+    for _, row in tqdm(test_examples.iterrows(), total=len(test_examples), leave=False):
+        prompt = prompt_prefix + format_example(row, choices, include_answer=False)
         input_ids = tokenizer.encode(prompt, return_tensors='pt').cuda()
         logits = model(input_ids).logits[:, -1].flatten()
-        choices = df.loc[idx, 'Question':'Answer'].index[1:-1]
-        probs = logits[[tokenizer.encode(x)[-1] for x in choices]].softmax(dim=0)
-        pred = choices[probs.argmax(dim=0).item()]
-        label = df.loc[idx, 'Answer']
-        score.append(pred == label)
-        result.loc[idx, 'Prediction'] = pred
+        probs = logits[[tokenizer.encode(choice)[0] for choice in choices]].softmax(dim=0)
+        predicted_choice = choices[probs.argmax(dim=0).item()]
+        accuracy_list.append(predicted_choice == row['Answer'])
+        row['Prediction'] = predicted_choice
+        results.append(row)
 
-    acc = np.mean(score)
-    return acc, result
+    overall_accuracy = np.mean(accuracy_list)
+    results_df = pd.DataFrame(results)
+    return overall_accuracy, results_df
 
 
-def main(model_path, data_dir, save_dir=None, fewshot=5):
+def main(model_path, data_dir, save_dir=None, n_shot=5, **kwargs):
     model_path = Path(model_path)
     data_dir = Path(data_dir)
-
-    save_dir = model_path/'cxmt' if save_dir is None else Path(save_dir)
-    # save_dir.mkdir(parents=True, exist_ok=False)
+    save_dir = model_path / 'cxmt' if save_dir is None else Path(save_dir)
+    save_dir.mkdir(parents=True, exist_ok=True)
 
     model = AutoModelForCausalLM.from_pretrained(
         model_path,
         device_map='auto',
-        torch_dtype=torch.float16
+        torch_dtype=torch.float16,
+        low_cpu_mem_usage=True,
+        attn_implementation='sdpa'
     ).eval()
     tokenizer = AutoTokenizer.from_pretrained(model_path)
 
-    result = {}
+    evaluation_results = {}
     csv_files = sorted(data_dir.glob('*.csv'))
-    for csv_path in tqdm(csv_files):
-        category = csv_path.stem
-        csv_info = pd.read_csv(csv_path)
-        acc, res = model_eval(model, tokenizer, csv_info, fewshot)
-        res.to_csv(save_dir/csv_path.name, index=False)
-        result[category] = acc
+    for csv_file in tqdm(csv_files):
+        category = csv_file.stem
+        csv_data = pd.read_csv(csv_file)
+        csv_data = csv_data.loc[:, ~csv_data.columns.str.contains('^Unnamed')]
+        accuracy, results_df = evaluate_model(model, tokenizer, csv_data, n_shot)
+        results_df.to_csv(save_dir / csv_file.name, index=False)
+        evaluation_results[category] = accuracy
 
-    for k, v in result.items():
-        print(f'Average accuracy {v*100:.2f} - {k}')
+    for category, accuracy in evaluation_results.items():
+        print(f'Average accuracy {accuracy*100:.2f}% - {category}')
 
 
 if __name__ == '__main__':
-    main(
-        '/home/app.e0016372/models/Meta-Llama-3-8B',
-        '/home/app.e0016372/data/temp'
-    )
+    fire.Fire(main)
